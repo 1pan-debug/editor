@@ -10,6 +10,7 @@ import 'editor_surface.dart';
 import 'find_bar.dart';
 import 'find_controller.dart';
 import 'syntax_highlighter.dart';
+import 'vim_mode.dart';
 
 class EditorPage extends StatefulWidget {
   const EditorPage({super.key, this.fileService});
@@ -32,7 +33,22 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   UndoHistoryController _undoController = UndoHistoryController();
   final FocusNode _editorFocusNode = FocusNode(debugLabel: 'editor_field');
   final FindController _findController = FindController();
+  final TextEditingController _vimCommandController = TextEditingController();
   bool _isFindBarVisible = false;
+  bool _isVimModeEnabled = false;
+  late final VimEngine _vimEngine = VimEngine(
+    onUndo: () => _undoController.undo(),
+    onWrite: () {
+      _runFileOperation(_saveDocument);
+    },
+    onQuit: (force) {
+      _vimCloseDocument(force: force);
+    },
+    onWriteQuit: () {
+      _vimWriteQuit();
+    },
+    onMessage: _showMessage,
+  );
   int _editorGeneration = 0;
   int _line = 1;
   int _column = 1;
@@ -54,6 +70,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
       ..removeListener(_handleEditingChanged)
       ..dispose();
     _editorFocusNode.dispose();
+    _vimCommandController.dispose();
+    _vimEngine.dispose();
     _findController
       ..removeListener(_syncFindSelection)
       ..dispose();
@@ -214,6 +232,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   void _replaceDocument(OpenedDocument opened, {String? path}) {
     _undoController.dispose();
     _textController.language = detectLanguageFromPath(path);
+    _vimEngine.reset();
+    _vimCommandController.clear();
     _document.replaceDocument(
       text: opened.text,
       path: path,
@@ -256,6 +276,60 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     }
     setState(() => _isFindBarVisible = false);
     _editorFocusNode.requestFocus();
+  }
+
+  void _toggleVimMode() {
+    setState(() => _isVimModeEnabled = !_isVimModeEnabled);
+    _vimEngine.reset();
+    _vimCommandController.clear();
+    _editorFocusNode.requestFocus();
+  }
+
+  void _executeVimCommand(String input) {
+    _vimEngine.executeCommand(input);
+    _editorFocusNode.requestFocus();
+  }
+
+  void _cancelVimCommand() {
+    _vimEngine.cancelCommand();
+    _vimCommandController.clear();
+    _editorFocusNode.requestFocus();
+  }
+
+  Future<void> _vimCloseDocument({required bool force}) async {
+    if (_isFileOperationInProgress) {
+      return;
+    }
+    if (!force && !await _confirmDiscardChanges()) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    _replaceDocument(
+      const OpenedDocument(
+        text: '',
+        lineEnding: DocumentLineEnding.lf,
+        hasUtf8Bom: false,
+      ),
+    );
+  }
+
+  Future<void> _vimWriteQuit() async {
+    if (_isFileOperationInProgress) {
+      return;
+    }
+    final saved = await _runFileOperation(_saveDocument);
+    if (!saved || !mounted || _document.isDirty) {
+      return;
+    }
+    _replaceDocument(
+      const OpenedDocument(
+        text: '',
+        lineEnding: DocumentLineEnding.lf,
+        hasUtf8Bom: false,
+      ),
+    );
   }
 
   Future<bool> _runFileOperation(Future<bool> Function() operation) async {
@@ -524,14 +598,34 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(color: colors.outlineVariant),
                   ),
-                  child: EditorSurface(
-                    key: ValueKey(_editorGeneration),
-                    controller: _textController,
-                    scrollController: _editorScrollController,
-                    undoController: _undoController,
-                    focusNode: _editorFocusNode,
+                  child: Focus(
+                    onKeyEvent: _isVimModeEnabled
+                        ? (node, event) =>
+                              _vimEngine.handleKeyEvent(event, _textController)
+                        : null,
+                    child: EditorSurface(
+                      key: ValueKey(_editorGeneration),
+                      controller: _textController,
+                      scrollController: _editorScrollController,
+                      undoController: _undoController,
+                      focusNode: _editorFocusNode,
+                    ),
                   ),
                 ),
+              ),
+              AnimatedBuilder(
+                animation: _vimEngine,
+                builder: (context, _) {
+                  if (!_isVimModeEnabled ||
+                      _vimEngine.mode != VimMode.command) {
+                    return const SizedBox.shrink();
+                  }
+                  return _VimCommandBar(
+                    controller: _vimCommandController,
+                    onSubmit: _executeVimCommand,
+                    onCancel: _cancelVimCommand,
+                  );
+                },
               ),
               _buildStatusBar(colors),
             ],
@@ -585,6 +679,12 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
             icon: const Icon(Icons.search_rounded),
           ),
           const Spacer(),
+          IconButton(
+            tooltip: _isVimModeEnabled ? '关闭 Vim 模式' : '启用 Vim 模式',
+            isSelected: _isVimModeEnabled,
+            onPressed: _toggleVimMode,
+            icon: const Icon(Icons.terminal_rounded),
+          ),
           PopupMenuButton<CodeLanguage>(
             tooltip: '选择语言模式',
             initialValue: _textController.language,
@@ -641,6 +741,46 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
             style: Theme.of(context).textTheme.labelMedium
                 ?.copyWith(color: colors.onSurfaceVariant),
           ),
+          const SizedBox(width: 16),
+          if (_isVimModeEnabled)
+            AnimatedBuilder(
+              animation: _vimEngine,
+              builder: (context, _) {
+                final mode = _vimEngine.mode;
+                final (background, foreground) = switch (mode) {
+                  VimMode.insert => (
+                    colors.primaryContainer,
+                    colors.onPrimaryContainer,
+                  ),
+                  VimMode.command => (
+                    colors.tertiaryContainer,
+                    colors.onTertiaryContainer,
+                  ),
+                  VimMode.normal => (
+                    colors.surfaceContainerHighest,
+                    colors.onSurfaceVariant,
+                  ),
+                };
+                return Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: background,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    vimModeDisplayName(mode),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: foreground,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                );
+              },
+            ),
           const Spacer(),
           AnimatedBuilder(
             animation: _document,
@@ -681,4 +821,92 @@ class _FindNextIntent extends Intent {
 
 class _FindPreviousIntent extends Intent {
   const _FindPreviousIntent();
+}
+
+class _VimCommandBar extends StatefulWidget {
+  const _VimCommandBar({
+    required this.controller,
+    required this.onSubmit,
+    required this.onCancel,
+  });
+
+  final TextEditingController controller;
+  final ValueChanged<String> onSubmit;
+  final VoidCallback onCancel;
+
+  static const Key commandFieldKey = Key('vim_command_field');
+
+  @override
+  State<_VimCommandBar> createState() => _VimCommandBarState();
+}
+
+class _VimCommandBarState extends State<_VimCommandBar> {
+  late final FocusNode _focusNode = FocusNode(debugLabel: 'vim_command_field');
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      widget.onCancel();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      height: 56,
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainer,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.terminal_rounded, size: 20, color: colors.onSurfaceVariant),
+          const SizedBox(width: 12),
+          Text(
+            ':',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Focus(
+              onKeyEvent: _handleKey,
+              child: TextField(
+                key: _VimCommandBar.commandFieldKey,
+                controller: widget.controller,
+                focusNode: _focusNode,
+                autofocus: true,
+                maxLines: 1,
+                textInputAction: TextInputAction.done,
+                onSubmitted: widget.onSubmit,
+                style: Theme.of(context).textTheme.bodyMedium,
+                decoration: const InputDecoration(
+                  isCollapsed: true,
+                  border: InputBorder.none,
+                  hintText: 'w / q / wq',
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            'Enter 执行，Esc 取消',
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: colors.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

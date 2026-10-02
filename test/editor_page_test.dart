@@ -27,6 +27,15 @@ Future<void> _pressControlF(WidgetTester tester) async {
   await tester.pump();
 }
 
+/// Presses ':' like a real US keyboard (Shift+semicolon), since the colon
+/// key alone has no physical key for the test event simulator.
+Future<void> _pressColon(WidgetTester tester) async {
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+  await tester.sendKeyEvent(LogicalKeyboardKey.semicolon);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+  await tester.pump();
+}
+
 void main() {
   testWidgets('edits text and supports undo and redo', (tester) async {
     await tester.pumpWidget(
@@ -475,6 +484,133 @@ void main() {
     final controller = _editorTextField(tester).controller!
         as SyntaxHighlightingController;
     expect(controller.language, CodeLanguage.plain);
+  });
+
+  testWidgets('vim mode intercepts keys and switches between modes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'abc');
+    await tester.pump();
+    _editorTextField(tester).controller!.selection =
+        const TextSelection.collapsed(offset: 0);
+
+    await tester.tap(find.byTooltip('启用 Vim 模式'));
+    await tester.pump();
+    expect(find.text('NORMAL'), findsOneWidget);
+
+    // x deletes the character under the cursor in normal mode.
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
+    await tester.pump();
+    expect(_editorTextField(tester).controller!.text, 'bc');
+
+    // i enters insert mode; typing (through the text input) edits the text.
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyI);
+    await tester.pump();
+    expect(find.text('INSERT'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'zbc');
+    await tester.pump();
+    expect(_editorTextField(tester).controller!.text, 'zbc');
+
+    // Esc returns to normal mode where 'q' is swallowed.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(find.text('NORMAL'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyQ);
+    await tester.pump();
+    expect(_editorTextField(tester).controller!.text, 'zbc');
+  });
+
+  testWidgets('disabling vim mode restores plain typing', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'abc');
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('启用 Vim 模式'));
+    await tester.pump();
+    // In normal mode 'h' is a movement key and never edits the text.
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyH);
+    await tester.pump();
+    expect(_editorTextField(tester).controller!.text, 'abc');
+
+    await tester.tap(find.byTooltip('关闭 Vim 模式'));
+    await tester.pump();
+    expect(find.text('NORMAL'), findsNothing);
+    // Plain editing works again without the mode gate.
+    await tester.enterText(find.byType(TextField), 'habc');
+    await tester.pump();
+    expect(_editorTextField(tester).controller!.text, 'habc');
+  });
+
+  testWidgets('dd deletes a line and the editor undo restores it', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'one\ntwo');
+    await tester.pump();
+    _editorTextField(tester).controller!.selection =
+        const TextSelection.collapsed(offset: 0);
+
+    await tester.tap(find.byTooltip('启用 Vim 模式'));
+    await tester.pump();
+    // Allow the undo history's throttled initial push to land.
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyD);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyD);
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(_editorTextField(tester).controller!.text, 'two');
+
+    await tester.tap(find.byTooltip('撤销'));
+    await tester.pump();
+    expect(_editorTextField(tester).controller!.text, 'one\ntwo');
+  });
+
+  testWidgets('vim :q on a dirty document goes through unsaved protection', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'draft');
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('启用 Vim 模式'));
+    await tester.pump();
+    await _pressColon(tester);
+    expect(find.byKey(const Key('vim_command_field')), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('vim_command_field')), 'q');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(find.text('有未保存的修改'), findsOneWidget);
+
+    await tester.tap(find.text('放弃修改'));
+    await tester.pumpAndSettle();
+
+    expect(_editorTextField(tester).controller!.text, '');
+    expect(find.text('NORMAL'), findsOneWidget);
+    expect(
+      find.byKey(const Key('vim_command_field')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('vim :w saves the document', (tester) async {
+    final fileService = _FakeDocumentFileService()..saveSelection = 'w.txt';
+    await tester.pumpWidget(
+      MaterialApp(home: EditorPage(fileService: fileService)),
+    );
+    await tester.enterText(find.byType(TextField), 'persist me');
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('启用 Vim 模式'));
+    await tester.pump();
+    await _pressColon(tester);
+    await tester.enterText(find.byKey(const Key('vim_command_field')), 'w');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(fileService.writtenDocuments['w.txt']!.text, 'persist me');
+    expect(find.text('w.txt'), findsOneWidget);
+    expect(find.text('NORMAL'), findsOneWidget);
   });
 }
 
