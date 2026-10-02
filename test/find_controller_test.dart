@@ -153,5 +153,34 @@ void main() {
 
       expect(controller.matches, isEmpty);
     });
+
+    test('finds matches quickly in a large document', () {
+      final buffer = StringBuffer();
+      for (var i = 0; i < 5000; i++) {
+        buffer
+          ..writeln('def function_$i(value):  # needle $i')
+          ..writeln('    return value + $i')
+          ..writeln();
+      }
+      final text = buffer.toString();
+
+      final controller = FindController();
+      final stopwatch = Stopwatch()..start();
+      controller.updateText(text, anchor: 0);
+      controller.startQuery('needle', anchor: 0);
+      stopwatch.stop();
+
+      expect(controller.matches, hasLength(5000));
+      expect(controller.statusText, '1/5000');
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+
+      final navigationWatch = Stopwatch()..start();
+      for (var i = 0; i < 1000; i++) {
+        controller.findNext();
+      }
+      navigationWatch.stop();
+      expect(controller.currentMatch!.start, greaterThan(0));
+      expect(navigationWatch.elapsed, lessThan(const Duration(seconds: 1)));
+    });
   });
 }
