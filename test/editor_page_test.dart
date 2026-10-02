@@ -5,6 +5,7 @@ import 'package:editor/document_state.dart';
 import 'package:editor/editor_page.dart';
 import 'package:editor/editor_surface.dart';
 import 'package:editor/find_bar.dart';
+import 'package:editor/syntax_highlighter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -397,6 +398,83 @@ void main() {
     expect(editorField.controller!.selection.baseOffset, 8);
     expect(editorField.controller!.selection.extentOffset, 11);
     expect(find.byType(FindBar), findsNothing);
+  });
+
+  testWidgets('opening a Python file enables Python highlighting', (
+    tester,
+  ) async {
+    final fileService = _FakeDocumentFileService()
+      ..openSelection = r'D:\src\tool.py'
+      ..documents[r'D:\src\tool.py'] = const OpenedDocument(
+        text: 'def main(): pass',
+        lineEnding: DocumentLineEnding.lf,
+        hasUtf8Bom: false,
+      );
+    await tester.pumpWidget(
+      MaterialApp(home: EditorPage(fileService: fileService)),
+    );
+
+    await tester.tap(find.byTooltip('打开文件 (Ctrl+O)'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Python'), findsOneWidget);
+    final controller = _editorTextField(tester).controller!
+        as SyntaxHighlightingController;
+    expect(controller.language, CodeLanguage.python);
+  });
+
+  testWidgets('language can be switched manually from the toolbar', (
+    tester,
+  ) async {
+    final fileService = _FakeDocumentFileService()
+      ..openSelection = r'D:\src\main.cpp'
+      ..documents[r'D:\src\main.cpp'] = const OpenedDocument(
+        text: 'int main() { return 0; }',
+        lineEnding: DocumentLineEnding.lf,
+        hasUtf8Bom: false,
+      );
+    await tester.pumpWidget(
+      MaterialApp(home: EditorPage(fileService: fileService)),
+    );
+    await tester.tap(find.byTooltip('打开文件 (Ctrl+O)'));
+    await tester.pumpAndSettle();
+    expect(find.text('C++'), findsOneWidget);
+
+    await tester.tap(find.text('C++'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Python'));
+    await tester.pumpAndSettle();
+
+    final controller = _editorTextField(tester).controller!
+        as SyntaxHighlightingController;
+    expect(controller.language, CodeLanguage.python);
+    expect(find.text('Python'), findsOneWidget);
+  });
+
+  testWidgets('a new document resets the language to plain text', (
+    tester,
+  ) async {
+    final fileService = _FakeDocumentFileService()
+      ..openSelection = r'D:\src\tool.py'
+      ..documents[r'D:\src\tool.py'] = const OpenedDocument(
+        text: 'value = 1',
+        lineEnding: DocumentLineEnding.lf,
+        hasUtf8Bom: false,
+      );
+    await tester.pumpWidget(
+      MaterialApp(home: EditorPage(fileService: fileService)),
+    );
+    await tester.tap(find.byTooltip('打开文件 (Ctrl+O)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Python'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('新建文档 (Ctrl+N)'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('纯文本'), findsOneWidget);
+    final controller = _editorTextField(tester).controller!
+        as SyntaxHighlightingController;
+    expect(controller.language, CodeLanguage.plain);
   });
 }
 

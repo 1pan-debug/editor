@@ -9,6 +9,7 @@ import 'document_file_service.dart';
 import 'editor_surface.dart';
 import 'find_bar.dart';
 import 'find_controller.dart';
+import 'syntax_highlighter.dart';
 
 class EditorPage extends StatefulWidget {
   const EditorPage({super.key, this.fileService});
@@ -25,7 +26,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   late final DocumentFileService _fileService =
       widget.fileService ?? LocalDocumentFileService();
   final DocumentState _document = DocumentState();
-  final TextEditingController _textController = TextEditingController();
+  final SyntaxHighlightingController _textController =
+      SyntaxHighlightingController();
   final ScrollController _editorScrollController = ScrollController();
   UndoHistoryController _undoController = UndoHistoryController();
   final FocusNode _editorFocusNode = FocusNode(debugLabel: 'editor_field');
@@ -211,6 +213,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
 
   void _replaceDocument(OpenedDocument opened, {String? path}) {
     _undoController.dispose();
+    _textController.language = detectLanguageFromPath(path);
     _document.replaceDocument(
       text: opened.text,
       path: path,
@@ -582,12 +585,42 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
             icon: const Icon(Icons.search_rounded),
           ),
           const Spacer(),
-          Icon(Icons.code_rounded, size: 18, color: colors.onSurfaceVariant),
-          const SizedBox(width: 8),
-          Text(
-            '纯文本',
-            style: Theme.of(context).textTheme.labelLarge
-                ?.copyWith(color: colors.onSurfaceVariant),
+          PopupMenuButton<CodeLanguage>(
+            tooltip: '选择语言模式',
+            initialValue: _textController.language,
+            onSelected: (language) {
+              setState(() => _textController.language = language);
+            },
+            itemBuilder: (context) => [
+              for (final language in CodeLanguage.values)
+                PopupMenuItem(
+                  value: language,
+                  child: Text(languageDisplayName(language)),
+                ),
+            ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.code_rounded,
+                    size: 18,
+                    color: colors.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  AnimatedBuilder(
+                    animation: _textController,
+                    builder: (context, _) => Text(
+                      languageDisplayName(_textController.language),
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
           const SizedBox(width: 12),
         ],
