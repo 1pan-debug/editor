@@ -1,12 +1,17 @@
+import 'dart:io' show FileSystemException;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'document_state.dart';
+import 'document_file_service.dart';
+import 'editor_surface.dart';
 
 class EditorPage extends StatefulWidget {
-  const EditorPage({super.key});
+  const EditorPage({super.key, this.fileService});
+
+  final DocumentFileService? fileService;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -15,6 +20,8 @@ class EditorPage extends StatefulWidget {
 enum _UnsavedAction { save, discard, cancel }
 
 class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
+  late final DocumentFileService _fileService =
+      widget.fileService ?? LocalDocumentFileService();
   final DocumentState _document = DocumentState();
   final TextEditingController _textController = TextEditingController();
   final ScrollController _editorScrollController = ScrollController();
@@ -22,6 +29,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   int _editorGeneration = 0;
   int _line = 1;
   int _column = 1;
+  bool _isFileOperationInProgress = false;
 
   @override
   void initState() {
@@ -100,12 +108,10 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
       case _UnsavedAction.discard:
         return true;
       case _UnsavedAction.save:
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('文件保存功能将在阶段 2 实现，当前修改仍保留。')),
-          );
-        }
-        return false;
+        final saved = _isFileOperationInProgress
+            ? await _saveDocument()
+            : await _runFileOperation(_saveDocument);
+        return saved && !_document.isDirty;
       case _UnsavedAction.cancel:
       case null:
         return false;
@@ -113,19 +119,159 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   }
 
   Future<void> _createDocument() async {
-    if (!await _confirmDiscardChanges() || !mounted) {
+    if (_isFileOperationInProgress ||
+        !await _confirmDiscardChanges() ||
+        !mounted) {
       return;
     }
 
-    _document.replaceDocument(text: '');
-    _textController.clear();
+    _replaceDocument(
+      const OpenedDocument(
+        text: '',
+        lineEnding: DocumentLineEnding.lf,
+        hasUtf8Bom: false,
+      ),
+    );
+  }
+
+  void _replaceDocument(OpenedDocument opened, {String? path}) {
     _undoController.dispose();
+    _document.replaceDocument(
+      text: opened.text,
+      path: path,
+      lineEnding: opened.lineEnding,
+      hasUtf8Bom: opened.hasUtf8Bom,
+    );
+    _textController.value = TextEditingValue(
+      text: opened.text,
+      selection: const TextSelection.collapsed(offset: 0),
+    );
     setState(() {
       _undoController = UndoHistoryController();
       _editorGeneration++;
       _line = 1;
       _column = 1;
     });
+  }
+
+  Future<bool> _runFileOperation(Future<bool> Function() operation) async {
+    if (_isFileOperationInProgress || !mounted) {
+      return false;
+    }
+
+    setState(() => _isFileOperationInProgress = true);
+    try {
+      return await operation();
+    } on Exception catch (error) {
+      if (mounted) {
+        _showFileError(error);
+      }
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() => _isFileOperationInProgress = false);
+      }
+    }
+  }
+
+  Future<bool> _openDocument() async {
+    final path = await _fileService.pickFileToOpen();
+    if (path == null) {
+      return false;
+    }
+
+    final opened = await _fileService.readDocument(path);
+    if (!await _confirmDiscardChanges() || !mounted) {
+      return false;
+    }
+
+    _replaceDocument(opened, path: path);
+    return true;
+  }
+
+  Future<bool> _saveDocument() async {
+    final path =
+        _document.path ?? await _fileService.pickFileToSave(_suggestedFileName);
+    if (path == null) {
+      return false;
+    }
+
+    final text = _document.text;
+    final lineEnding = _document.lineEnding;
+    final hasUtf8Bom = _document.hasUtf8Bom;
+    await _fileService.writeDocument(
+      path: path,
+      text: text,
+      lineEnding: lineEnding,
+      hasUtf8Bom: hasUtf8Bom,
+    );
+
+    if (!mounted) {
+      return false;
+    }
+
+    _document.markSaved(
+      path: path,
+      savedText: text,
+      lineEnding: lineEnding,
+      hasUtf8Bom: hasUtf8Bom,
+    );
+    _showMessage('已保存到 $path');
+    return true;
+  }
+
+  Future<bool> _saveAsDocument() async {
+    final path = await _fileService.pickFileToSave(_suggestedFileName);
+    if (path == null) {
+      return false;
+    }
+
+    final text = _document.text;
+    final lineEnding = _document.lineEnding;
+    final hasUtf8Bom = _document.hasUtf8Bom;
+    await _fileService.writeDocument(
+      path: path,
+      text: text,
+      lineEnding: lineEnding,
+      hasUtf8Bom: hasUtf8Bom,
+    );
+
+    if (!mounted) {
+      return false;
+    }
+
+    _document.markSaved(
+      path: path,
+      savedText: text,
+      lineEnding: lineEnding,
+      hasUtf8Bom: hasUtf8Bom,
+    );
+    _showMessage('已另存为 $path');
+    return true;
+  }
+
+  String get _suggestedFileName {
+    final path = _document.path;
+    if (path == null || path.isEmpty) {
+      return 'untitled.txt';
+    }
+    return path.split(RegExp(r'[/\\]')).last;
+  }
+
+  void _showFileError(Exception error) {
+    final message = switch (error) {
+      FormatException() => '文件不是有效的 UTF-8 文本，未打开以避免内容损坏。',
+      FileSystemException() => '文件读写失败：${error.toString()}',
+      PlatformException() => '文件操作失败：${error.message ?? error.code}',
+      _ => '文件操作失败：$error',
+    };
+    _showMessage(message);
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -141,12 +287,28 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
       shortcuts: const {
         SingleActivator(LogicalKeyboardKey.keyN, control: true):
             _CreateDocumentIntent(),
+        SingleActivator(LogicalKeyboardKey.keyO, control: true):
+            _OpenDocumentIntent(),
+        SingleActivator(LogicalKeyboardKey.keyS, control: true):
+            _SaveDocumentIntent(),
       },
       child: Actions(
         actions: {
           _CreateDocumentIntent: CallbackAction<_CreateDocumentIntent>(
             onInvoke: (_) {
               _createDocument();
+              return null;
+            },
+          ),
+          _OpenDocumentIntent: CallbackAction<_OpenDocumentIntent>(
+            onInvoke: (_) {
+              _runFileOperation(_openDocument);
+              return null;
+            },
+          ),
+          _SaveDocumentIntent: CallbackAction<_SaveDocumentIntent>(
+            onInvoke: (_) {
+              _runFileOperation(_saveDocument);
               return null;
             },
           ),
@@ -174,8 +336,41 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
             ),
             actions: [
               IconButton(
+                tooltip: '打开文件 (Ctrl+O)',
+                onPressed: _isFileOperationInProgress
+                    ? null
+                    : () => _runFileOperation(_openDocument),
+                icon: const Icon(Icons.folder_open_outlined),
+              ),
+              IconButton(
+                tooltip: '保存 (Ctrl+S)',
+                onPressed: _isFileOperationInProgress
+                    ? null
+                    : () => _runFileOperation(_saveDocument),
+                icon: const Icon(Icons.save_outlined),
+              ),
+              PopupMenuButton<String>(
+                tooltip: '更多文件操作',
+                enabled: !_isFileOperationInProgress,
+                onSelected: (value) {
+                  if (value == 'saveAs') {
+                    _runFileOperation(_saveAsDocument);
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: 'saveAs',
+                    child: ListTile(
+                      leading: Icon(Icons.drive_file_rename_outline),
+                      title: Text('另存为…'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                ],
+              ),
+              IconButton(
                 tooltip: '新建文档 (Ctrl+N)',
-                onPressed: _createDocument,
+                onPressed: _isFileOperationInProgress ? null : _createDocument,
                 icon: const Icon(Icons.note_add_outlined),
               ),
               const SizedBox(width: 8),
@@ -196,33 +391,11 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(color: colors.outlineVariant),
                   ),
-                  child: Scrollbar(
-                    controller: _editorScrollController,
-                    thumbVisibility: true,
-                    child: TextField(
-                      key: ValueKey(_editorGeneration),
-                      controller: _textController,
-                      scrollController: _editorScrollController,
-                      undoController: _undoController,
-                      autofocus: true,
-                      expands: true,
-                      maxLines: null,
-                      minLines: null,
-                      keyboardType: TextInputType.multiline,
-                      textAlignVertical: TextAlignVertical.top,
-                      style: TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 14,
-                        height: 1.6,
-                        color: colors.onSurface,
-                      ),
-                      cursorColor: colors.primary,
-                      decoration: const InputDecoration(
-                        hintText: '在此输入文本…',
-                        border: InputBorder.none,
-                        isCollapsed: true,
-                      ),
-                    ),
+                  child: EditorSurface(
+                    key: ValueKey(_editorGeneration),
+                    controller: _textController,
+                    scrollController: _editorScrollController,
+                    undoController: _undoController,
                   ),
                 ),
               ),
@@ -319,4 +492,12 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
 
 class _CreateDocumentIntent extends Intent {
   const _CreateDocumentIntent();
+}
+
+class _OpenDocumentIntent extends Intent {
+  const _OpenDocumentIntent();
+}
+
+class _SaveDocumentIntent extends Intent {
+  const _SaveDocumentIntent();
 }

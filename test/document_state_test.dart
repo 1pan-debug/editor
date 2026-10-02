@@ -19,6 +19,25 @@ void main() {
       expect(document.isDirty, isTrue);
     });
 
+    test('tracks file format and saved snapshots independently', () {
+      final document = DocumentState();
+      addTearDown(document.dispose);
+
+      document.replaceDocument(
+        text: 'saved',
+        path: 'notes.txt',
+        lineEnding: DocumentLineEnding.crlf,
+        hasUtf8Bom: true,
+      );
+      document.updateText('edited');
+      document.markSaved(path: 'copy.txt', savedText: 'saved');
+
+      expect(document.path, 'copy.txt');
+      expect(document.lineEnding, DocumentLineEnding.crlf);
+      expect(document.hasUtf8Bom, isTrue);
+      expect(document.isDirty, isTrue);
+    });
+
     test('replacing a document resets its path and dirty state', () {
       final document = DocumentState();
       addTearDown(document.dispose);
