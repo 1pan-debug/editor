@@ -6,11 +6,15 @@ class EditorSurface extends StatelessWidget {
     required this.controller,
     required this.undoController,
     required this.scrollController,
+    this.focusNode,
+    this.readOnly = false,
   });
 
   final TextEditingController controller;
   final UndoHistoryController undoController;
   final ScrollController scrollController;
+  final FocusNode? focusNode;
+  final bool readOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -20,9 +24,11 @@ class EditorSurface extends StatelessWidget {
       thumbVisibility: true,
       child: TextField(
         controller: controller,
+        focusNode: focusNode,
         scrollController: scrollController,
         undoController: undoController,
         autofocus: true,
+        readOnly: readOnly,
         expands: true,
         maxLines: null,
         minLines: null,

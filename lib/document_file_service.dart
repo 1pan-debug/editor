@@ -23,7 +23,7 @@ abstract interface class DocumentFileService {
   Future<String?> pickFileToSave(String suggestedName);
 
   Future<OpenedDocument> readDocument(String path);
-
+  
   Future<void> writeDocument({
     required String path,
     required String text,

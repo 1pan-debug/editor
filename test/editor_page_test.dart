@@ -3,9 +3,28 @@ import 'dart:io';
 import 'package:editor/document_file_service.dart';
 import 'package:editor/document_state.dart';
 import 'package:editor/editor_page.dart';
+import 'package:editor/editor_surface.dart';
+import 'package:editor/find_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+TextField _editorTextField(WidgetTester tester) {
+  return tester.widget<TextField>(
+    find.descendant(
+      of: find.byType(EditorSurface),
+      matching: find.byType(TextField),
+    ),
+  );
+}
+
+Future<void> _pressControlF(WidgetTester tester) async {
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.keyF);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.keyF);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+  await tester.pump();
+}
 
 void main() {
   testWidgets('edits text and supports undo and redo', (tester) async {
@@ -249,6 +268,135 @@ void main() {
     expect(fileService.writtenDocuments['copy.txt']!.hasUtf8Bom, isTrue);
     expect(find.text('copy.txt'), findsOneWidget);
     expect(find.text('已保存'), findsOneWidget);
+  });
+
+  testWidgets('find bar locates and navigates matches', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'one two one');
+    await tester.pump();
+
+    await _pressControlF(tester);
+    expect(find.byType(FindBar), findsOneWidget);
+
+    await tester.enterText(find.byKey(FindBar.queryFieldKey), 'one');
+    await tester.pump();
+
+    final editorField = _editorTextField(tester);
+    expect(editorField.controller!.selection.baseOffset, 0);
+    expect(editorField.controller!.selection.extentOffset, 3);
+    expect(find.text('1/2'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('查找下一个 (Enter)'));
+    await tester.pump();
+    expect(editorField.controller!.selection.baseOffset, 8);
+    expect(editorField.controller!.selection.extentOffset, 11);
+    expect(find.text('2/2'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('查找上一个 (Shift+Enter)'));
+    await tester.pump();
+    expect(editorField.controller!.selection.baseOffset, 0);
+    expect(find.text('1/2'), findsOneWidget);
+  });
+
+  testWidgets('find reports when the query has no matches', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'hello');
+    await tester.pump();
+
+    await _pressControlF(tester);
+    await tester.enterText(find.byKey(FindBar.queryFieldKey), 'zzz');
+    await tester.pump();
+
+    expect(find.text('无匹配'), findsOneWidget);
+    final nextButton = tester.widget<IconButton>(
+      find.ancestor(
+        of: find.byIcon(Icons.keyboard_arrow_down_rounded),
+        matching: find.byType(IconButton),
+      ).first,
+    );
+    expect(nextButton.onPressed, isNull);
+  });
+
+  testWidgets('case sensitivity toggle narrows matches', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'Code code CODE');
+    await tester.pump();
+
+    await _pressControlF(tester);
+    await tester.enterText(find.byKey(FindBar.queryFieldKey), 'code');
+    await tester.pump();
+    expect(find.text('1/3'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('区分大小写'));
+    await tester.pump();
+
+    final editorField = _editorTextField(tester);
+    expect(find.text('1/1'), findsOneWidget);
+    expect(editorField.controller!.selection.baseOffset, 5);
+    expect(editorField.controller!.selection.extentOffset, 9);
+  });
+
+  testWidgets('closing find keeps the selection and refocuses the editor', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'one two one');
+    await tester.pump();
+
+    await _pressControlF(tester);
+    await tester.enterText(find.byKey(FindBar.queryFieldKey), 'one');
+    await tester.pump();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+
+    expect(find.byType(FindBar), findsNothing);
+    final editorField = _editorTextField(tester);
+    expect(editorField.controller!.selection.baseOffset, 0);
+    expect(editorField.controller!.selection.extentOffset, 3);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'editor_field');
+  });
+
+  testWidgets('find prefills the query from the selected text', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'alpha beta');
+    await tester.pump();
+
+    _editorTextField(tester).controller!.selection = const TextSelection(
+      baseOffset: 6,
+      extentOffset: 10,
+    );
+    await tester.pump();
+
+    await _pressControlF(tester);
+
+    final queryField = tester.widget<TextField>(
+      find.byKey(FindBar.queryFieldKey),
+    );
+    expect(queryField.controller!.text, 'beta');
+    expect(find.text('1/1'), findsOneWidget);
+  });
+
+  testWidgets('F3 finds the next match while the find bar is closed', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: EditorPage()));
+    await tester.enterText(find.byType(TextField), 'one two one');
+    await tester.pump();
+
+    await _pressControlF(tester);
+    await tester.enterText(find.byKey(FindBar.queryFieldKey), 'one');
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.f3);
+    await tester.pump();
+
+    final editorField = _editorTextField(tester);
+    expect(editorField.controller!.selection.baseOffset, 8);
+    expect(editorField.controller!.selection.extentOffset, 11);
+    expect(find.byType(FindBar), findsNothing);
   });
 }
 

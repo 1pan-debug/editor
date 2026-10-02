@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'document_state.dart';
 import 'document_file_service.dart';
 import 'editor_surface.dart';
+import 'find_bar.dart';
+import 'find_controller.dart';
 
 class EditorPage extends StatefulWidget {
   const EditorPage({super.key, this.fileService});
@@ -26,6 +28,9 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _editorScrollController = ScrollController();
   UndoHistoryController _undoController = UndoHistoryController();
+  final FocusNode _editorFocusNode = FocusNode(debugLabel: 'editor_field');
+  final FindController _findController = FindController();
+  bool _isFindBarVisible = false;
   int _editorGeneration = 0;
   int _line = 1;
   int _column = 1;
@@ -36,6 +41,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _textController.addListener(_handleEditingChanged);
+    _findController.addListener(_syncFindSelection);
+    _findController.updateText('');
   }
 
   @override
@@ -43,6 +50,10 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _textController
       ..removeListener(_handleEditingChanged)
+      ..dispose();
+    _editorFocusNode.dispose();
+    _findController
+      ..removeListener(_syncFindSelection)
       ..dispose();
     _editorScrollController.dispose();
     _undoController.dispose();
@@ -52,7 +63,71 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
 
   void _handleEditingChanged() {
     _document.updateText(_textController.text);
+    _findController.updateText(_textController.text);
     _updateCursorPosition();
+  }
+
+  int _appliedFindActionVersion = 0;
+
+  /// Moves the editor selection to the current find match after an explicit
+  /// find action. Text updates only refresh the match list so the user's own
+  /// cursor and selection are never hijacked while typing.
+  void _syncFindSelection() {
+    if (_findController.actionVersion == _appliedFindActionVersion) {
+      return;
+    }
+    _appliedFindActionVersion = _findController.actionVersion;
+
+    final match = _findController.currentMatch;
+    if (match == null || !mounted) {
+      return;
+    }
+
+    _textController.selection = TextSelection(
+      baseOffset: match.start,
+      extentOffset: match.end,
+    );
+    _scrollToOffset(match.start);
+    _updateCursorPosition();
+  }
+
+  static const double _editorFontSize = 14;
+  static const double _editorLineHeightFactor = 1.6;
+
+  void _scrollToOffset(int offset) {
+    if (!_editorScrollController.hasClients) {
+      return;
+    }
+
+    final text = _textController.text;
+    final clampedOffset = offset.clamp(0, text.length);
+    var lineIndex = 0;
+    for (var i = 0; i < clampedOffset; i++) {
+      if (text.codeUnitAt(i) == 0x0A) {
+        lineIndex++;
+      }
+    }
+
+    final lineExtent = _editorFontSize * _editorLineHeightFactor;
+    final targetTop = lineIndex * lineExtent;
+    final currentOffset = _editorScrollController.offset;
+    final viewportExtent = _editorScrollController.position.viewportDimension;
+    final margin = lineExtent * 2;
+
+    double? target;
+    if (targetTop - currentOffset < margin) {
+      target = targetTop - margin;
+    } else if (currentOffset + viewportExtent - (targetTop + lineExtent) <
+        margin) {
+      target = targetTop + lineExtent + margin - viewportExtent;
+    }
+    if (target == null) {
+      return;
+    }
+
+    _editorScrollController.jumpTo(
+      target.clamp(0.0, _editorScrollController.position.maxScrollExtent),
+    );
   }
 
   void _updateCursorPosition() {
@@ -146,12 +221,38 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
       text: opened.text,
       selection: const TextSelection.collapsed(offset: 0),
     );
+    _findController.updateText(opened.text, anchor: 0);
     setState(() {
       _undoController = UndoHistoryController();
       _editorGeneration++;
       _line = 1;
       _column = 1;
     });
+  }
+
+  final GlobalKey<FindBarState> _findBarKey = GlobalKey<FindBarState>();
+
+  void _openFind() {
+    if (!mounted) {
+      return;
+    }
+    final selection = _textController.selection;
+    if (selection.isValid && !selection.isCollapsed) {
+      final selected = selection.textInside(_textController.text);
+      if (selected.isNotEmpty && !selected.contains('\n')) {
+        _findController.startQuery(selected, anchor: selection.start);
+      }
+    }
+    setState(() => _isFindBarVisible = true);
+    _findBarKey.currentState?.focusQueryField();
+  }
+
+  void _closeFind() {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _isFindBarVisible = false);
+    _editorFocusNode.requestFocus();
   }
 
   Future<bool> _runFileOperation(Future<bool> Function() operation) async {
@@ -291,6 +392,11 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
             _OpenDocumentIntent(),
         SingleActivator(LogicalKeyboardKey.keyS, control: true):
             _SaveDocumentIntent(),
+        SingleActivator(LogicalKeyboardKey.keyF, control: true):
+            _FindIntent(),
+        SingleActivator(LogicalKeyboardKey.f3): _FindNextIntent(),
+        SingleActivator(LogicalKeyboardKey.f3, shift: true):
+            _FindPreviousIntent(),
       },
       child: Actions(
         actions: {
@@ -309,6 +415,24 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
           _SaveDocumentIntent: CallbackAction<_SaveDocumentIntent>(
             onInvoke: (_) {
               _runFileOperation(_saveDocument);
+              return null;
+            },
+          ),
+          _FindIntent: CallbackAction<_FindIntent>(
+            onInvoke: (_) {
+              _openFind();
+              return null;
+            },
+          ),
+          _FindNextIntent: CallbackAction<_FindNextIntent>(
+            onInvoke: (_) {
+              _findController.findNext();
+              return null;
+            },
+          ),
+          _FindPreviousIntent: CallbackAction<_FindPreviousIntent>(
+            onInvoke: (_) {
+              _findController.findPrevious();
               return null;
             },
           ),
@@ -379,6 +503,12 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
           body: Column(
             children: [
               _buildToolbar(colors),
+              if (_isFindBarVisible)
+                FindBar(
+                  key: _findBarKey,
+                  controller: _findController,
+                  onClose: _closeFind,
+                ),
               Expanded(
                 child: Container(
                   margin: const EdgeInsets.fromLTRB(20, 12, 20, 12),
@@ -396,6 +526,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                     controller: _textController,
                     scrollController: _editorScrollController,
                     undoController: _undoController,
+                    focusNode: _editorFocusNode,
                   ),
                 ),
               ),
@@ -444,6 +575,11 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
               );
             },
             icon: const Icon(Icons.select_all_rounded),
+          ),
+          IconButton(
+            tooltip: '查找 (Ctrl+F)',
+            onPressed: _openFind,
+            icon: const Icon(Icons.search_rounded),
           ),
           const Spacer(),
           Icon(Icons.code_rounded, size: 18, color: colors.onSurfaceVariant),
@@ -500,4 +636,16 @@ class _OpenDocumentIntent extends Intent {
 
 class _SaveDocumentIntent extends Intent {
   const _SaveDocumentIntent();
+}
+
+class _FindIntent extends Intent {
+  const _FindIntent();
+}
+
+class _FindNextIntent extends Intent {
+  const _FindNextIntent();
+}
+
+class _FindPreviousIntent extends Intent {
+  const _FindPreviousIntent();
 }
